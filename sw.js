@@ -1,6 +1,6 @@
 // Startrol-monitor: bewaart de app op het toestel zodat ze zonder internet werkt.
 // Verhoog het versienummer telkens je index.html aanpast, zodat de gsm de nieuwe versie ophaalt.
-const CACHE = 'startrol-v1';
+const CACHE = 'startrol-v2';
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

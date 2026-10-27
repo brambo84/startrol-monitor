@@ -13,9 +13,9 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:#000;color:#e5e5e5;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 body{padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
-#scr{display:block;margin:0 auto;width:min(100%,calc((100vh - 90px) * 640 / 340));height:auto;aspect-ratio:640/340}
-.bar{display:flex;flex-wrap:wrap;gap:8px;padding:10px;justify-content:center}
-button{font:600 16px system-ui,sans-serif;padding:12px 16px;border-radius:10px;border:1px solid #3f3f46;background:#18181b;color:#fff;min-height:48px;cursor:pointer}
+#scr{display:block;margin:0 auto}
+.bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;padding:8px 12px;max-width:960px;margin:0 auto}
+button{font:600 16px system-ui,sans-serif;padding:12px 10px;border-radius:10px;border:1px solid #3f3f46;background:#18181b;color:#fff;min-height:50px;cursor:pointer}
 button:focus-visible,input:focus-visible{outline:2px solid #4ade80;outline-offset:2px}
 button.go{background:#14532d;border-color:#22c55e}
 button.warn{background:#7f1d1d;border-color:#ef4444}
@@ -29,14 +29,15 @@ input[type=number]{width:110px;font:600 18px system-ui,sans-serif;padding:8px;bo
 .run{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #27272a;font-size:14px}
 .run div{min-width:0}
 .run small{color:#a1a1aa}
-.msg{font-size:14px;color:#fbbf24;text-align:center;margin:6px 12px 0;min-height:0}
+.msg{font-size:14px;color:#fbbf24;text-align:center;margin:4px 12px 0}
+.msg:empty{display:none}
 .row-btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 </style>
 </head>
 <body>
-<canvas id="scr" width="640" height="340" aria-label="Startrol-scherm"></canvas>
+<canvas id="scr" width="360" height="512" aria-label="Startrol-scherm"></canvas>
 <p class="msg" id="msg"></p>
-<div class="bar">
+<div class="bar" id="bar">
   <button id="bArm" class="go">Klaar voor start</button>
   <button id="bStop">Stop</button>
   <button id="bSet">Instellingen</button>
@@ -84,6 +85,43 @@ let demo = null;           // demo-replay
 let wakeLock = null;
 const gps = { ok: false, acc: null, v: 0, iv: [], lastT: 0, err: '' };
 
+/* ---------- schermindeling ---------- */
+// Liggend: 640 x 340. Rechtop: 360 x 512.
+const LAYOUTS = {
+  land: {
+    W: 640, H: 340,
+    hdr: [{ x: 14, y: 26, k: 'full' }], gpsXY: [626, 26],
+    gs: { x: 14, y: 112, f: 80 }, kt: { x: 18, y: 138 },
+    lines: { x: 14, y: [172, 198, 224], f: 20 },
+    gauge: { cx: 450, cy: 200, r: 120 },
+    bar: { x: 14, w: 612, y: 236 },
+    strip: { x: 14, y: 262, w: 612, h: 64, f: 30 }
+  },
+  port: {
+    W: 360, H: 512,
+    hdr: [{ x: 14, y: 24, k: 'baan' }, { x: 14, y: 46, k: 'los' }], gpsXY: [346, 24],
+    gs: { x: 12, y: 150, f: 108 }, kt: { x: 18, y: 176 },
+    lines: { x: 200, y: [94, 124, 154], f: 20 },
+    gauge: { cx: 180, cy: 372, r: 124 },
+    bar: { x: 14, w: 332, y: 398 },
+    strip: { x: 14, y: 426, w: 332, h: 76, f: 28 }
+  }
+};
+let LY = LAYOUTS.port;
+
+function setupCanvas() {
+  LY = window.innerWidth > window.innerHeight ? LAYOUTS.land : LAYOUTS.port;
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  cv.width = Math.round(LY.W * dpr); cv.height = Math.round(LY.H * dpr);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const below = $('bar').offsetHeight + ($('msg').offsetHeight || 0) + 8;
+  const availH = Math.max(200, window.innerHeight - below);
+  const w = Math.min(window.innerWidth, availH * LY.W / LY.H);
+  cv.style.width = Math.floor(w) + 'px';
+  cv.style.height = Math.floor(w * LY.H / LY.W) + 'px';
+  draw();
+}
+
 /* ---------- opslag ---------- */
 function loadSettings() {
   try { return Object.assign({}, DEF, JSON.parse(localStorage.getItem('srm_set') || '{}')); }
@@ -93,9 +131,7 @@ function saveSettings() { try { localStorage.setItem('srm_set', JSON.stringify(S
 function loadRuns() { try { return JSON.parse(localStorage.getItem('srm_runs') || '[]'); } catch (e) { return []; } }
 function saveRuns(r) {
   try { localStorage.setItem('srm_runs', JSON.stringify(r)); }
-  catch (e) { // vol: oudste weg en opnieuw proberen
-    if (r.length > 1) { r.pop(); saveRuns(r); }
-  }
+  catch (e) { if (r.length > 1) { r.pop(); saveRuns(r); } }
 }
 
 /* ---------- berekening ---------- */
@@ -139,7 +175,6 @@ function feed(f) {
   else v = 0;
   if (prev && f.t > prev.t) { gps.iv.push((f.t - prev.t) / 1000); if (gps.iv.length > 5) gps.iv.shift(); }
   gps.ok = true; gps.err = ''; gps.acc = f.acc; gps.v = v; gps.lastT = performance.now();
-
   if (run) step(f, v);
   prev = f;
   showMsg(); draw();
@@ -149,7 +184,7 @@ function step(f, v) {
   if (run.state === 'armed') {
     if (v >= S.arm) {
       Object.assign(run, { state: 'rol', t0: f.t, d: 0, vPrev: v, prevT: f.t, maxV: v });
-      run.pts.push([0, f.lat, f.lon, f.acc, v, 0, null]);
+      run.pts.push([0, +f.lat.toFixed(6), +f.lon.toFixed(6), f.acc == null ? null : Math.round(f.acc), +v.toFixed(1), 0, null]);
     }
     return;
   }
@@ -202,7 +237,7 @@ function stop() {
   if (demo) { clearInterval(demo.timer); demo = null; }
   if (run && (run.state === 'rol' || run.state === 'los')) endRun('gestopt');
   else { run = null; releaseWake(); }
-  draw();
+  showMsg(); draw();
 }
 
 /* ---------- scherm wakker houden ---------- */
@@ -242,22 +277,21 @@ function startDemo(n) {
 }
 
 /* ---------- tekenen ---------- */
-function setupCanvas() {
-  const dpr = Math.min(3, window.devicePixelRatio || 1);
-  cv.width = 640 * dpr; cv.height = 340 * dpr;
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  draw();
+function fitFont(txt, maxW, base, weight) {
+  let fs = base;
+  g.font = weight + ' ' + fs + 'px system-ui,sans-serif';
+  while (g.measureText(txt).width > maxW && fs > 12) { fs--; g.font = weight + ' ' + fs + 'px system-ui,sans-serif'; }
 }
 function gauge(cx, cy, r, val, pre) {
   const lo = -0.3, hi = 0.6, ang = v => Math.PI + (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo) * Math.PI;
-  g.lineWidth = 20;
+  g.lineWidth = Math.round(r / 6);
   const zc = pre ? ['#5b2121', '#5a4a14', '#1e4d2b'] : ['#dc2626', '#eab308', '#16a34a'];
   [[lo, 0, zc[0]], [0, 0.10, zc[1]], [0.10, hi, zc[2]]].forEach(z => {
     g.strokeStyle = z[2]; g.beginPath(); g.arc(cx, cy, r, ang(z[0]), ang(z[1])); g.stroke();
   });
   g.fillStyle = '#9a9aa2'; g.font = '500 15px system-ui,sans-serif'; g.textAlign = 'center';
   [-0.3, 0, 0.3, 0.6].forEach(t => {
-    const a = ang(t); g.fillText((t > 0 ? '+' : '') + Math.round(t * 100), cx + Math.cos(a) * (r + 26), cy + Math.sin(a) * (r + 26) + 5);
+    const a = ang(t); g.fillText((t > 0 ? '+' : '') + Math.round(t * 100), cx + Math.cos(a) * (r + 24), cy + Math.sin(a) * (r + 24) + 5);
   });
   if (val !== null) {
     const a = ang(val);
@@ -265,11 +299,11 @@ function gauge(cx, cy, r, val, pre) {
     g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * (r - 6), cy + Math.sin(a) * (r - 6)); g.stroke(); g.lineCap = 'butt';
   }
   g.fillStyle = '#fff'; g.beginPath(); g.arc(cx, cy, 8, 0, 2 * Math.PI); g.fill();
-  g.font = '700 34px system-ui,sans-serif';
+  g.font = '700 36px system-ui,sans-serif';
   g.fillStyle = val === null ? '#6b6b73' : pre ? '#b4b4bb' : (val >= 0.10 ? '#4ade80' : val >= 0 ? '#facc15' : '#f87171');
   g.fillText(val === null ? '--' : ((val >= 0 ? '+' : '') + Math.round(val * 100) + '%'), cx, cy - 34);
   g.fillStyle = pre && val !== null ? '#facc15' : '#9a9aa2'; g.font = '600 14px system-ui,sans-serif';
-  g.fillText(pre && val !== null ? 'VOORLOPIG' : 'RESERVE', cx, cy - 74);
+  g.fillText(pre && val !== null ? 'VOORLOPIG' : 'RESERVE', cx, cy - 76);
 }
 function gpsLabel() {
   if (demo) return ['DEMO', '#facc15'];
@@ -280,7 +314,7 @@ function gpsLabel() {
   return ['GPS ±' + acc + 'm ' + hz.toFixed(1) + 'Hz', gps.acc != null && gps.acc > 15 ? '#facc15' : '#4ade80'];
 }
 function draw() {
-  const R = run, t = performance.now() / 1000;
+  const L = LY, R = run, t = performance.now() / 1000;
   const rolling = R && (R.state === 'rol' || R.state === 'los' || R.state === 'klaar') && R.t0 != null;
   const d = rolling ? R.d : 0;
   const v = gps.v || 0;
@@ -291,33 +325,47 @@ function draw() {
   const red = R && R.alarm && R.state === 'rol';
   const flash = Math.floor(t * 4) % 2 === 0;
 
-  g.fillStyle = red && flash ? '#5c0b0b' : '#000'; g.fillRect(0, 0, 640, 340);
-  g.textAlign = 'left'; g.fillStyle = '#8a8a92'; g.font = '600 16px system-ui,sans-serif';
-  g.fillText('BAAN ' + S.rwy + '  BESCHIKB ' + Math.round(avail()) + '  LOS ' + S.vlof + ' kt', 14, 26);
-  const [gl, gc] = gpsLabel(); g.textAlign = 'right'; g.fillStyle = gc; g.fillText(gl, 626, 26);
+  g.fillStyle = red && flash ? '#5c0b0b' : '#000'; g.fillRect(0, 0, L.W, L.H);
 
-  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = '700 80px system-ui,sans-serif';
-  g.fillText(String(Math.round(v)), 14, 112);
-  g.fillStyle = '#9a9aa2'; g.font = '600 18px system-ui,sans-serif'; g.fillText('kt GS', 18, 138);
-  g.font = '600 20px system-ui,sans-serif';
-  g.fillStyle = '#93c5fd'; g.fillText('Rol    ' + Math.round(d) + ' m', 14, 172);
-  g.fillStyle = left < 0 ? '#f87171' : '#e5e5e5'; g.fillText('Rest   ' + Math.round(left) + ' m', 14, 198);
+  // kopregel(s)
+  g.textAlign = 'left'; g.fillStyle = '#8a8a92'; g.font = '600 15px system-ui,sans-serif';
+  L.hdr.forEach(h => {
+    const txt = h.k === 'full' ? 'BAAN ' + S.rwy + '  BESCHIKB ' + Math.round(avail()) + '  LOS ' + S.vlof + ' kt'
+              : h.k === 'baan' ? 'BAAN ' + S.rwy + '  BESCHIKB ' + Math.round(avail())
+              : 'LOS ' + S.vlof + ' kt  KLIM ' + S.vclb + ' kt';
+    g.fillText(txt, h.x, h.y);
+  });
+  const [gl, gc] = gpsLabel(); g.textAlign = 'right'; g.fillStyle = gc;
+  g.fillText(gl, L.gpsXY[0], L.hdr.length > 1 ? L.hdr[1].y : L.gpsXY[1]);
+
+  // grondsnelheid
+  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = '700 ' + L.gs.f + 'px system-ui,sans-serif';
+  g.fillText(String(Math.round(v)), L.gs.x, L.gs.y);
+  g.fillStyle = '#9a9aa2'; g.font = '600 18px system-ui,sans-serif'; g.fillText('kt GS', L.kt.x, L.kt.y);
+
+  // rol, rest, los
+  g.font = '600 ' + L.lines.f + 'px system-ui,sans-serif';
+  g.fillStyle = '#93c5fd'; g.fillText('Rol    ' + Math.round(d) + ' m', L.lines.x, L.lines.y[0]);
+  g.fillStyle = left < 0 ? '#f87171' : '#e5e5e5'; g.fillText('Rest   ' + Math.round(left) + ' m', L.lines.x, L.lines.y[1]);
   let lt = 'Los    --', lc = '#9a9aa2';
   if (R && R.lofD != null) { lt = 'Los na ' + Math.round(R.lofD) + ' m'; lc = '#93c5fd'; }
   else if (pl !== null) { lt = 'Los ± ' + Math.round(pl) + ' m'; lc = pl > avail() ? '#f87171' : (pl > avail() * 0.85 ? '#facc15' : '#4ade80'); }
-  g.fillStyle = lc; g.fillText(lt, 14, 224);
+  g.fillStyle = lc; g.fillText(lt, L.lines.x, L.lines.y[2]);
 
-  gauge(450, 200, 120, mg, pre);
+  // meter
+  gauge(L.gauge.cx, L.gauge.cy, L.gauge.r, mg, pre);
 
-  const x0 = 14, w = 612, y = 236, span = Math.max(S.rwy, 100), sc = w / span;
-  g.fillStyle = '#3f6212'; g.fillRect(x0, y, w, 10);
-  g.fillStyle = '#93c5fd'; g.fillRect(x0 + Math.min(S.off + avail(), span) * sc - 1, y - 4, 3, 18);
-  if (pl !== null) { g.fillStyle = '#facc15'; g.fillRect(x0 + Math.min(pl + S.off, span) * sc - 1, y - 4, 3, 18); }
-  g.fillStyle = '#fff'; g.beginPath(); g.arc(x0 + Math.max(0, Math.min(pos, span)) * sc, y + 5, 7, 0, 2 * Math.PI); g.fill();
+  // baan
+  const B = L.bar, span = Math.max(S.rwy, 100), sc = B.w / span;
+  g.fillStyle = '#3f6212'; g.fillRect(B.x, B.y, B.w, 10);
+  g.fillStyle = '#93c5fd'; g.fillRect(B.x + Math.min(S.off + avail(), span) * sc - 1, B.y - 4, 3, 18);
+  if (pl !== null) { g.fillStyle = '#facc15'; g.fillRect(B.x + Math.min(pl + S.off, span) * sc - 1, B.y - 4, 3, 18); }
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(B.x + Math.max(0, Math.min(pos, span)) * sc, B.y + 5, 7, 0, 2 * Math.PI); g.fill();
 
+  // statusbalk
   let txt = 'Druk op KLAAR VOOR START', col = '#9a9aa2', sbg = '#18181b';
   if (R) {
-    if (R.state === 'armed') { txt = 'KLAAR - meting start vanaf ' + S.arm + ' kt'; col = '#fff'; sbg = '#1e3a8a'; }
+    if (R.state === 'armed') { txt = 'KLAAR - start vanaf ' + S.arm + ' kt'; col = '#fff'; sbg = '#1e3a8a'; }
     else if (R.state === 'los') { txt = 'LOS - grondeffect tot ' + S.vclb + ' kt'; col = '#082f49'; sbg = '#7dd3fc'; }
     else if (R.state === 'rol') {
       if (left < 0) { txt = 'BAANEINDE VOORBIJ'; col = '#fff'; sbg = '#dc2626'; }
@@ -332,12 +380,18 @@ function draw() {
       else { txt = 'GESTOPT na ' + Math.round(R.d) + ' m'; col = '#fff'; sbg = '#27272a'; }
     }
   }
-  g.fillStyle = sbg; g.fillRect(14, 262, 612, 64);
-  g.fillStyle = col; g.font = '700 30px system-ui,sans-serif'; g.textAlign = 'center'; g.fillText(txt, 320, 305);
+  const T = L.strip;
+  g.fillStyle = sbg; g.fillRect(T.x, T.y, T.w, T.h);
+  g.fillStyle = col; g.textAlign = 'center'; fitFont(txt, T.w - 20, T.f, '700');
+  g.fillText(txt, T.x + T.w / 2, T.y + T.h / 2 + T.f * 0.36);
 }
-setInterval(() => { if (run && run.alarm && run.state === 'rol') draw(); else if (!demo) draw(); }, 250);
+setInterval(() => { if (!demo) draw(); }, 250);
 
-function showMsg() { $('msg').textContent = demo ? '' : gps.err; }
+function showMsg() {
+  const before = $('msg').textContent;
+  $('msg').textContent = demo ? '' : gps.err;
+  if (before !== $('msg').textContent) setupCanvas();
+}
 
 /* ---------- instellingen ---------- */
 function fillSettings() { KEYS.forEach(k => $('s_' + k).value = S[k]); $('setErr').textContent = ''; }
@@ -409,6 +463,7 @@ $('bDemo2').addEventListener('click', () => { const e = readSettings(); if (e) {
 
 /* ---------- start ---------- */
 window.addEventListener('resize', setupCanvas);
+window.addEventListener('orientationchange', () => setTimeout(setupCanvas, 200));
 setupCanvas();
 startGPS();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
