@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Startrol-monitor</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;background:#000;color:#e5e5e5;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+#scr{display:block;margin:0 auto;width:min(100%,calc((100vh - 90px) * 640 / 340));height:auto;aspect-ratio:640/340}
+.bar{display:flex;flex-wrap:wrap;gap:8px;padding:10px;justify-content:center}
+button{font:600 16px system-ui,sans-serif;padding:12px 16px;border-radius:10px;border:1px solid #3f3f46;background:#18181b;color:#fff;min-height:48px;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:2px solid #4ade80;outline-offset:2px}
+button.go{background:#14532d;border-color:#22c55e}
+button.warn{background:#7f1d1d;border-color:#ef4444}
+section{max-width:640px;margin:0 auto;padding:4px 16px 32px}
+[hidden]{display:none!important}
+h2{font-size:18px;margin:18px 0 6px}
+label.row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #27272a;font-size:15px}
+label.row small{display:block;color:#a1a1aa;font-size:12px;margin-top:2px}
+input[type=number]{width:110px;font:600 18px system-ui,sans-serif;padding:8px;border-radius:8px;border:1px solid #3f3f46;background:#09090b;color:#fff;text-align:right}
+.err{color:#f87171;font-size:13px;min-height:18px;margin:6px 0}
+.run{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #27272a;font-size:14px}
+.run div{min-width:0}
+.run small{color:#a1a1aa}
+.msg{font-size:14px;color:#fbbf24;text-align:center;margin:6px 12px 0;min-height:0}
+.row-btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+</style>
+</head>
+<body>
+<canvas id="scr" width="640" height="340" aria-label="Startrol-scherm"></canvas>
+<p class="msg" id="msg"></p>
+<div class="bar">
+  <button id="bArm" class="go">Klaar voor start</button>
+  <button id="bStop">Stop</button>
+  <button id="bSet">Instellingen</button>
+  <button id="bLogs">Logs</button>
+</div>
+
+<section id="pSet" hidden>
+  <h2>Baan</h2>
+  <label class="row">Baanlengte (m)<input type="number" id="s_rwy" inputmode="numeric" min="100" max="5000" step="10"></label>
+  <label class="row"><span>Startpositie (m)<small>Afstand vanaf de drempel waar je de rol begint</small></span><input type="number" id="s_off" inputmode="numeric" min="0" max="2000" step="10"></label>
+  <label class="row"><span>Uiterst lospunt (%)<small>100 = baaneinde, 85 = 15% baan over als reserve</small></span><input type="number" id="s_lim" inputmode="numeric" min="50" max="100" step="5"></label>
+  <h2>Vliegtuig</h2>
+  <label class="row">Loskomsnelheid (kt)<input type="number" id="s_vlof" inputmode="numeric" min="10" max="150" step="1"></label>
+  <label class="row"><span>Klimsnelheid (kt)<small>Einde van de meting</small></span><input type="number" id="s_vclb" inputmode="numeric" min="10" max="200" step="1"></label>
+  <label class="row"><span>Plafondsnelheid V∞ (kt)<small>Vorm van de curve, 100 voor de Archer III</small></span><input type="number" id="s_vinf" inputmode="numeric" min="20" max="300" step="1"></label>
+  <h2>Meting</h2>
+  <label class="row"><span>Rol start vanaf (kt)<small>Na "Klaar voor start"</small></span><input type="number" id="s_arm" inputmode="numeric" min="2" max="20" step="1"></label>
+  <label class="row"><span>Alarm vanaf (kt)<small>Daaronder enkel een voorlopige waarde</small></span><input type="number" id="s_alm" inputmode="numeric" min="5" max="100" step="1"></label>
+  <p class="err" id="setErr"></p>
+  <div class="row-btns">
+    <button id="bSave" class="go">Bewaren</button>
+    <button id="bDemo1">Demo: start 1</button>
+    <button id="bDemo2">Demo: start 2</button>
+  </div>
+</section>
+
+<section id="pLogs" hidden>
+  <h2>Opgeslagen starts</h2>
+  <div id="runList"></div>
+  <div class="row-btns"><button id="bClear" class="warn">Alle logs wissen</button></div>
+</section>
+
+<script>
+'use strict';
+const KT = 1.94384;
+const DEF = { rwy: 690, off: 0, lim: 100, vlof: 65, vclb: 75, vinf: 100, arm: 5, alm: 30 };
+const KEYS = Object.keys(DEF);
+const $ = id => document.getElementById(id);
+const cv = $('scr'), g = cv.getContext('2d');
+
+let S = loadSettings();
+let run = null;            // huidige meting
+let prev = null;           // vorige GPS-meting
+let demo = null;           // demo-replay
+let wakeLock = null;
+const gps = { ok: false, acc: null, v: 0, iv: [], lastT: 0, err: '' };
+
+/* ---------- opslag ---------- */
+function loadSettings() {
+  try { return Object.assign({}, DEF, JSON.parse(localStorage.getItem('srm_set') || '{}')); }
+  catch (e) { return Object.assign({}, DEF); }
+}
+function saveSettings() { try { localStorage.setItem('srm_set', JSON.stringify(S)); } catch (e) {} }
+function loadRuns() { try { return JSON.parse(localStorage.getItem('srm_runs') || '[]'); } catch (e) { return []; } }
+function saveRuns(r) {
+  try { localStorage.setItem('srm_runs', JSON.stringify(r)); }
+  catch (e) { // vol: oudste weg en opnieuw proberen
+    if (r.length > 1) { r.pop(); saveRuns(r); }
+  }
+}
+
+/* ---------- berekening ---------- */
+function avail() { return Math.max(50, (S.rwy - S.off) * S.lim / 100); }
+function margin(d, v) {
+  if (v < 10 || d < 5) return null;
+  const b = -Math.log(1 - (S.vlof / S.vinf) ** 2) / (2 * avail());
+  return v / (S.vinf * Math.sqrt(1 - Math.exp(-2 * b * d))) - 1;
+}
+function predLof(d, v) {
+  if (v < S.alm || v >= S.vlof || d <= 0) return null;
+  const be = -Math.log(1 - (v / S.vinf) ** 2) / (2 * d);
+  return -Math.log(1 - (S.vlof / S.vinf) ** 2) / (2 * be);
+}
+function hav(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLa = (b.lat - a.lat) * r, dLo = (b.lon - a.lon) * r;
+  const x = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+/* ---------- GPS ---------- */
+function startGPS() {
+  if (!('geolocation' in navigator)) { gps.err = 'Deze browser geeft geen toegang tot de GPS.'; showMsg(); return; }
+  navigator.geolocation.watchPosition(p => {
+    if (demo) return;
+    feed({ t: p.timestamp, lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, spd: p.coords.speed });
+  }, e => {
+    gps.ok = false;
+    gps.err = e.code === 1
+      ? 'Locatietoegang geweigerd. Sta locatie toe voor deze app in de instellingen van Chrome.'
+      : 'Nog geen GPS-fix. Zorg voor vrij zicht op de lucht.';
+    showMsg(); draw();
+  }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+
+function feed(f) {
+  let v;
+  if (f.spd != null && isFinite(f.spd)) v = f.spd * KT;
+  else if (prev && f.t > prev.t) v = hav(prev, f) / ((f.t - prev.t) / 1000) * KT;
+  else v = 0;
+  if (prev && f.t > prev.t) { gps.iv.push((f.t - prev.t) / 1000); if (gps.iv.length > 5) gps.iv.shift(); }
+  gps.ok = true; gps.err = ''; gps.acc = f.acc; gps.v = v; gps.lastT = performance.now();
+
+  if (run) step(f, v);
+  prev = f;
+  showMsg(); draw();
+}
+
+function step(f, v) {
+  if (run.state === 'armed') {
+    if (v >= S.arm) {
+      Object.assign(run, { state: 'rol', t0: f.t, d: 0, vPrev: v, prevT: f.t, maxV: v });
+      run.pts.push([0, f.lat, f.lon, f.acc, v, 0, null]);
+    }
+    return;
+  }
+  if (run.state !== 'rol' && run.state !== 'los') return;
+  const dt = (f.t - run.prevT) / 1000;
+  if (dt > 0 && dt < 5) run.d += (run.vPrev + v) / 2 / KT * dt;
+  run.vPrev = v; run.prevT = f.t; run.v = v;
+  run.maxV = Math.max(run.maxV, v);
+  const mg = margin(run.d, v);
+  run.mg = mg;
+
+  if (run.state === 'rol') {
+    if (mg !== null && v >= S.alm) {
+      run.minM = run.minM == null ? mg : Math.min(run.minM, mg);
+      run.bad = mg < 0 ? run.bad + Math.max(dt, 0) : 0;
+      if (run.bad >= 1.5 && !run.alarm) { run.alarm = true; run.alarmD = run.d; }
+    }
+    if (v >= S.vlof) { run.state = 'los'; run.lofD = run.d; }
+    else if (run.maxV >= 20 && v < run.maxV - 10) { run.pts.push(pt(f, v, mg)); endRun('afgebroken'); return; }
+  } else if (run.state === 'los') {
+    if (v >= S.vclb || (f.t - run.t0) / 1000 > 120) { run.pts.push(pt(f, v, mg)); endRun('klim'); return; }
+  }
+  run.pts.push(pt(f, v, mg));
+}
+function pt(f, v, mg) {
+  return [+((f.t - run.t0) / 1000).toFixed(2), +f.lat.toFixed(6), +f.lon.toFixed(6),
+          f.acc == null ? null : Math.round(f.acc), +v.toFixed(1), +run.d.toFixed(1),
+          mg == null ? null : +(mg * 100).toFixed(1)];
+}
+
+/* ---------- meting starten en stoppen ---------- */
+function arm() {
+  run = { state: 'armed', pts: [], d: 0, v: 0, bad: 0, alarm: false, alarmD: null, lofD: null, minM: null, mg: null,
+          set: Object.assign({}, S), date: new Date().toISOString(), demo: !!demo };
+  requestWake(); draw();
+}
+function endRun(reason) {
+  if (!run) return;
+  const wasRolling = run.state === 'rol' || run.state === 'los';
+  run.reason = reason; run.state = 'klaar';
+  if (wasRolling && run.pts.length > 1 && !run.demo) {
+    const runs = loadRuns();
+    runs.unshift({ date: run.date, reason, set: run.set, lofD: run.lofD, alarm: run.alarm, alarmD: run.alarmD,
+                   minM: run.minM, pts: run.pts });
+    saveRuns(runs.slice(0, 15));
+  }
+  releaseWake(); draw();
+}
+function stop() {
+  if (demo) { clearInterval(demo.timer); demo = null; }
+  if (run && (run.state === 'rol' || run.state === 'los')) endRun('gestopt');
+  else { run = null; releaseWake(); }
+  draw();
+}
+
+/* ---------- scherm wakker houden ---------- */
+async function requestWake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && run && run.state !== 'klaar') requestWake();
+});
+
+/* ---------- demo met de twee echte starts ---------- */
+const D1 = [[0,0],[5,8.4],[10,11.8],[20,16.6],[40,23.4],[77,31],[93,36],[186,48],[323,60],[492,71],[699,74],[776,74]];
+const D2 = [[0,0],[5,5.2],[10,7.4],[20,10.5],[40,14.8],[100,23.4],[165,30],[180,32],[269,37],[363,44],[496,49],[630,54],[783,63],[816,66],[954,68],[989,67],[1131,65]];
+function vAt(D, d) {
+  for (let i = 0; i < D.length - 1; i++) if (d <= D[i + 1][0]) {
+    const f = (d - D[i][0]) / (D[i + 1][0] - D[i][0]); return D[i][1] + f * (D[i + 1][1] - D[i][1]);
+  }
+  return null;
+}
+function startDemo(n) {
+  stop(); hidePanels();
+  const D = n === 1 ? D1 : D2;
+  demo = { dd: 0, t: Date.now(), pre: 10 };
+  arm();
+  demo.timer = setInterval(() => {
+    demo.t += 100;
+    let v = 0;
+    if (demo.pre > 0) demo.pre--;
+    else {
+      v = vAt(D, demo.dd);
+      if (v === null || !run || run.state === 'klaar') { clearInterval(demo.timer); demo = null; draw(); return; }
+      demo.dd += Math.max(1, v / KT) * 0.1;
+    }
+    feed({ t: demo.t, lat: 0, lon: 0, acc: 3, spd: v / KT });
+  }, 100);
+}
+
+/* ---------- tekenen ---------- */
+function setupCanvas() {
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  cv.width = 640 * dpr; cv.height = 340 * dpr;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+function gauge(cx, cy, r, val, pre) {
+  const lo = -0.3, hi = 0.6, ang = v => Math.PI + (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo) * Math.PI;
+  g.lineWidth = 20;
+  const zc = pre ? ['#5b2121', '#5a4a14', '#1e4d2b'] : ['#dc2626', '#eab308', '#16a34a'];
+  [[lo, 0, zc[0]], [0, 0.10, zc[1]], [0.10, hi, zc[2]]].forEach(z => {
+    g.strokeStyle = z[2]; g.beginPath(); g.arc(cx, cy, r, ang(z[0]), ang(z[1])); g.stroke();
+  });
+  g.fillStyle = '#9a9aa2'; g.font = '500 15px system-ui,sans-serif'; g.textAlign = 'center';
+  [-0.3, 0, 0.3, 0.6].forEach(t => {
+    const a = ang(t); g.fillText((t > 0 ? '+' : '') + Math.round(t * 100), cx + Math.cos(a) * (r + 26), cy + Math.sin(a) * (r + 26) + 5);
+  });
+  if (val !== null) {
+    const a = ang(val);
+    g.strokeStyle = pre ? '#b4b4bb' : '#fff'; g.lineWidth = 5; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * (r - 6), cy + Math.sin(a) * (r - 6)); g.stroke(); g.lineCap = 'butt';
+  }
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(cx, cy, 8, 0, 2 * Math.PI); g.fill();
+  g.font = '700 34px system-ui,sans-serif';
+  g.fillStyle = val === null ? '#6b6b73' : pre ? '#b4b4bb' : (val >= 0.10 ? '#4ade80' : val >= 0 ? '#facc15' : '#f87171');
+  g.fillText(val === null ? '--' : ((val >= 0 ? '+' : '') + Math.round(val * 100) + '%'), cx, cy - 34);
+  g.fillStyle = pre && val !== null ? '#facc15' : '#9a9aa2'; g.font = '600 14px system-ui,sans-serif';
+  g.fillText(pre && val !== null ? 'VOORLOPIG' : 'RESERVE', cx, cy - 74);
+}
+function gpsLabel() {
+  if (demo) return ['DEMO', '#facc15'];
+  if (!gps.ok || performance.now() - gps.lastT > 3000) return ['GEEN GPS', '#f87171'];
+  const iv = gps.iv.length ? gps.iv.reduce((a, b) => a + b, 0) / gps.iv.length : 1;
+  const hz = iv > 0 ? 1 / iv : 0;
+  const acc = gps.acc == null ? '?' : Math.round(gps.acc);
+  return ['GPS ±' + acc + 'm ' + hz.toFixed(1) + 'Hz', gps.acc != null && gps.acc > 15 ? '#facc15' : '#4ade80'];
+}
+function draw() {
+  const R = run, t = performance.now() / 1000;
+  const rolling = R && (R.state === 'rol' || R.state === 'los' || R.state === 'klaar') && R.t0 != null;
+  const d = rolling ? R.d : 0;
+  const v = gps.v || 0;
+  const mg = R && R.state === 'rol' ? R.mg : null;
+  const pre = v < S.alm;
+  const pl = R && R.state === 'rol' ? predLof(d, v) : null;
+  const pos = d + S.off, left = S.rwy - pos;
+  const red = R && R.alarm && R.state === 'rol';
+  const flash = Math.floor(t * 4) % 2 === 0;
+
+  g.fillStyle = red && flash ? '#5c0b0b' : '#000'; g.fillRect(0, 0, 640, 340);
+  g.textAlign = 'left'; g.fillStyle = '#8a8a92'; g.font = '600 16px system-ui,sans-serif';
+  g.fillText('BAAN ' + S.rwy + '  BESCHIKB ' + Math.round(avail()) + '  LOS ' + S.vlof + ' kt', 14, 26);
+  const [gl, gc] = gpsLabel(); g.textAlign = 'right'; g.fillStyle = gc; g.fillText(gl, 626, 26);
+
+  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = '700 80px system-ui,sans-serif';
+  g.fillText(String(Math.round(v)), 14, 112);
+  g.fillStyle = '#9a9aa2'; g.font = '600 18px system-ui,sans-serif'; g.fillText('kt GS', 18, 138);
+  g.font = '600 20px system-ui,sans-serif';
+  g.fillStyle = '#93c5fd'; g.fillText('Rol    ' + Math.round(d) + ' m', 14, 172);
+  g.fillStyle = left < 0 ? '#f87171' : '#e5e5e5'; g.fillText('Rest   ' + Math.round(left) + ' m', 14, 198);
+  let lt = 'Los    --', lc = '#9a9aa2';
+  if (R && R.lofD != null) { lt = 'Los na ' + Math.round(R.lofD) + ' m'; lc = '#93c5fd'; }
+  else if (pl !== null) { lt = 'Los ± ' + Math.round(pl) + ' m'; lc = pl > avail() ? '#f87171' : (pl > avail() * 0.85 ? '#facc15' : '#4ade80'); }
+  g.fillStyle = lc; g.fillText(lt, 14, 224);
+
+  gauge(450, 200, 120, mg, pre);
+
+  const x0 = 14, w = 612, y = 236, span = Math.max(S.rwy, 100), sc = w / span;
+  g.fillStyle = '#3f6212'; g.fillRect(x0, y, w, 10);
+  g.fillStyle = '#93c5fd'; g.fillRect(x0 + Math.min(S.off + avail(), span) * sc - 1, y - 4, 3, 18);
+  if (pl !== null) { g.fillStyle = '#facc15'; g.fillRect(x0 + Math.min(pl + S.off, span) * sc - 1, y - 4, 3, 18); }
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(x0 + Math.max(0, Math.min(pos, span)) * sc, y + 5, 7, 0, 2 * Math.PI); g.fill();
+
+  let txt = 'Druk op KLAAR VOOR START', col = '#9a9aa2', sbg = '#18181b';
+  if (R) {
+    if (R.state === 'armed') { txt = 'KLAAR - meting start vanaf ' + S.arm + ' kt'; col = '#fff'; sbg = '#1e3a8a'; }
+    else if (R.state === 'los') { txt = 'LOS - grondeffect tot ' + S.vclb + ' kt'; col = '#082f49'; sbg = '#7dd3fc'; }
+    else if (R.state === 'rol') {
+      if (left < 0) { txt = 'BAANEINDE VOORBIJ'; col = '#fff'; sbg = '#dc2626'; }
+      else if (R.alarm) { txt = 'ABORT AANBEVOLEN  ' + Math.round(((mg ?? R.minM) || 0) * 100) + '%'; col = '#fff'; sbg = '#dc2626'; }
+      else if (mg === null) { txt = 'ROL - meten...'; col = '#fff'; sbg = '#27272a'; }
+      else if (pre) { txt = mg < 0 ? 'Trage aanloop?  ' + Math.round(mg * 100) + '%' : 'Aanloop - voorlopig'; col = mg < 0 ? '#422006' : '#fff'; sbg = mg < 0 ? '#a16207' : '#27272a'; }
+      else if (mg < 0.10) { txt = 'KRAP  +' + Math.round(mg * 100) + '%'; col = '#422006'; sbg = '#facc15'; }
+      else { txt = 'RESERVE OK  +' + Math.round(mg * 100) + '%'; col = '#052e16'; sbg = '#4ade80'; }
+    } else if (R.state === 'klaar') {
+      if (R.reason === 'klim') { txt = 'KLIM - los na ' + Math.round(R.lofD) + ' m'; col = '#052e16'; sbg = '#4ade80'; }
+      else if (R.reason === 'afgebroken') { txt = 'AFGEBROKEN na ' + Math.round(R.d) + ' m'; col = '#fff'; sbg = '#7c2d12'; }
+      else { txt = 'GESTOPT na ' + Math.round(R.d) + ' m'; col = '#fff'; sbg = '#27272a'; }
+    }
+  }
+  g.fillStyle = sbg; g.fillRect(14, 262, 612, 64);
+  g.fillStyle = col; g.font = '700 30px system-ui,sans-serif'; g.textAlign = 'center'; g.fillText(txt, 320, 305);
+}
+setInterval(() => { if (run && run.alarm && run.state === 'rol') draw(); else if (!demo) draw(); }, 250);
+
+function showMsg() { $('msg').textContent = demo ? '' : gps.err; }
+
+/* ---------- instellingen ---------- */
+function fillSettings() { KEYS.forEach(k => $('s_' + k).value = S[k]); $('setErr').textContent = ''; }
+function readSettings() {
+  const n = {};
+  for (const k of KEYS) {
+    const el = $('s_' + k), v = parseFloat(el.value);
+    if (!isFinite(v) || v < +el.min || v > +el.max) return 'Vul bij "' + el.closest('label').firstChild.textContent.trim() + '" een waarde tussen ' + el.min + ' en ' + el.max + ' in.';
+    n[k] = v;
+  }
+  if (n.vlof >= n.vinf) return 'De plafondsnelheid moet hoger zijn dan de loskomsnelheid.';
+  if (n.vclb <= n.vlof) return 'De klimsnelheid moet hoger zijn dan de loskomsnelheid.';
+  if (n.off >= n.rwy) return 'De startpositie moet kleiner zijn dan de baanlengte.';
+  S = n; saveSettings(); return null;
+}
+KEYS.forEach(k => $('s_' + k).addEventListener('input', () => $('setErr').textContent = ''));
+
+/* ---------- logs ---------- */
+function toCSV(r) {
+  const s = r.set;
+  const head = [
+    '# Startrol-monitor log', '# datum;' + r.date, '# baan_m;' + s.rwy, '# startpositie_m;' + s.off,
+    '# uiterst_lospunt_pct;' + s.lim, '# los_kt;' + s.vlof, '# klim_kt;' + s.vclb, '# vinf_kt;' + s.vinf,
+    '# resultaat;' + r.reason + (r.lofD != null ? ';los_na_m;' + Math.round(r.lofD) : '') + (r.alarm ? ';alarm_bij_m;' + Math.round(r.alarmD) : ''),
+    't_s;lat;lon;nauwkeurigheid_m;gs_kt;afstand_m;reserve_pct'
+  ];
+  return head.concat(r.pts.map(p => p.map(x => x == null ? '' : x).join(';'))).join('\n');
+}
+async function exportRun(i) {
+  const r = loadRuns()[i]; if (!r) return;
+  const name = 'startrol_' + r.date.slice(0, 16).replace(/[:T]/g, '-') + '.csv';
+  const file = new File([toCSV(r)], name, { type: 'text/csv' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+function renderLogs() {
+  const runs = loadRuns(), box = $('runList'); box.innerHTML = '';
+  if (!runs.length) { box.innerHTML = '<p class="run"><small>Nog geen starts opgeslagen. Elke echte meting wordt hier automatisch bewaard.</small></p>'; return; }
+  runs.forEach((r, i) => {
+    const row = document.createElement('div'); row.className = 'run';
+    const info = document.createElement('div');
+    const dt = new Date(r.date);
+    const res = r.reason === 'klim' ? 'los na ' + Math.round(r.lofD) + ' m' : r.reason;
+    info.innerHTML = '<div></div><small></small>';
+    info.firstChild.textContent = dt.toLocaleDateString('nl-BE') + ' ' + dt.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' }) + ' · ' + res;
+    info.lastChild.textContent = 'baan ' + r.set.rwy + ' m · min. reserve ' + (r.minM == null ? '--' : Math.round(r.minM * 100) + '%') + (r.alarm ? ' · alarm' : '') + ' · ' + r.pts.length + ' punten';
+    const b = document.createElement('button'); b.textContent = 'Delen'; b.addEventListener('click', () => exportRun(i));
+    row.append(info, b); box.appendChild(row);
+  });
+}
+let clearArmed = false;
+$('bClear').addEventListener('click', () => {
+  if (!clearArmed) { clearArmed = true; $('bClear').textContent = 'Zeker? Tik nogmaals'; setTimeout(() => { clearArmed = false; $('bClear').textContent = 'Alle logs wissen'; }, 4000); return; }
+  saveRuns([]); clearArmed = false; $('bClear').textContent = 'Alle logs wissen'; renderLogs();
+});
+
+/* ---------- knoppen ---------- */
+function hidePanels() { $('pSet').hidden = true; $('pLogs').hidden = true; }
+$('bArm').addEventListener('click', () => { if (demo) stop(); hidePanels(); arm(); });
+$('bStop').addEventListener('click', stop);
+$('bSet').addEventListener('click', () => { const open = $('pSet').hidden; hidePanels(); if (open) { fillSettings(); $('pSet').hidden = false; $('pSet').scrollIntoView({ behavior: 'smooth' }); } });
+$('bLogs').addEventListener('click', () => { const open = $('pLogs').hidden; hidePanels(); if (open) { renderLogs(); $('pLogs').hidden = false; $('pLogs').scrollIntoView({ behavior: 'smooth' }); } });
+$('bSave').addEventListener('click', () => { const e = readSettings(); if (e) { $('setErr').textContent = e; return; } hidePanels(); draw(); });
+$('bDemo1').addEventListener('click', () => { const e = readSettings(); if (e) { $('setErr').textContent = e; return; } startDemo(1); });
+$('bDemo2').addEventListener('click', () => { const e = readSettings(); if (e) { $('setErr').textContent = e; return; } startDemo(2); });
+
+/* ---------- start ---------- */
+window.addEventListener('resize', setupCanvas);
+setupCanvas();
+startGPS();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
